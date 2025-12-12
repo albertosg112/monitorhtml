@@ -1,0 +1,319 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Reporte del Sensor</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <style>
+        :root {
+            --bg: #f8fafc;
+            --fg: #1e293b;
+            --primary: #3b82f6;
+            --success: #10b981;
+            --danger: #ef4444;
+            --border: #e2e8f0;
+        }
+        body {
+            font-family: 'Segoe UI', system-ui, sans-serif;
+            background-color: var(--bg);
+            color: var(--fg);
+            padding: 20px;
+            margin: 0;
+        }
+        .container {
+            max-width: 1000px;
+            margin: 0 auto;
+            background: white;
+            border-radius: 12px;
+            box-shadow: 0 4px 20px rgba(0,0,0,0.08);
+            padding: 24px;
+        }
+        h1, h2, h3 {
+            margin: 0 0 16px 0;
+            color: var(--fg);
+        }
+        h1 {
+            font-size: 1.8rem;
+            display: flex;
+            gap: 12px;
+            align-items: center;
+        }
+        .tag {
+            background: var(--primary);
+            color: white;
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 0.85rem;
+        }
+
+        .controls {
+            margin: 16px 0 24px;
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+        .btn-day {
+            padding: 6px 14px;
+            background: #e2e8f0;
+            border: none;
+            border-radius: 6px;
+            cursor: pointer;
+            font-weight: 600;
+        }
+        .btn-day.active {
+            background: var(--primary);
+            color: white;
+        }
+
+        .chart-container {
+            height: 360px;
+            margin: 20px 0;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 16px;
+            font-size: 0.9rem;
+        }
+        th, td {
+            padding: 10px;
+            text-align: left;
+            border-bottom: 1px solid var(--border);
+        }
+        th {
+            background: #f1f5f9;
+            font-weight: 600;
+        }
+        .row-alert {
+            background: #fff1f2;
+            color: var(--danger);
+        }
+        .empty {
+            text-align: center;
+            color: #94a3b8;
+            padding: 20px;
+        }
+
+        .loading {
+            text-align: center;
+            padding: 40px;
+        }
+        .spinner {
+            width: 40px;
+            height: 40px;
+            border: 4px solid #e2e8f0;
+            border-top-color: var(--primary);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin: 0 auto 16px;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+
+        .section {
+            margin-top: 32px;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <div id="loading" class="loading">
+        <div class="spinner"></div>
+        <div id="status">Cargando historial...</div>
+    </div>
+
+    <div id="content" style="display:none">
+        <h1>
+            <span id="sensorName">Sensor</span>
+            <span class="tag" id="teamName">Equipo</span>
+        </h1>
+
+        <div class="controls" id="daySelector">
+            <button class="btn-day" data-days="1">1 día</button>
+            <button class="btn-day" data-days="3">3 días</button>
+            <button class="btn-day active" data-days="7">7 días</button>
+        </div>
+
+        <div class="chart-container">
+            <canvas id="chart"></canvas>
+        </div>
+
+        <div class="section">
+            <h2>⚠️ Alertas (Fuera de rango: 2°C – 8°C)</h2>
+            <div style="max-height: 250px; overflow-y: auto; border: 1px solid var(--border); border-radius: 8px;">
+                <table id="alertTable">
+                    <thead><tr><th>Fecha y Hora</th><th>Valor</th><th>Estado</th></tr></thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="section">
+            <h2>📡 Cortes de Conexión (>20 min)</h2>
+            <table id="wifiTable">
+                <thead><tr><th>Inicio</th><th>Duración</th><th>Fin</th></tr></thead>
+                <tbody></tbody>
+            </table>
+        </div>
+    </div>
+</div>
+
+<script>
+    const p = new URLSearchParams(window.location.search);
+    const ID = p.get('id');
+    const KEY = p.get('key');
+    const FIELD = p.get('field');
+    let DAYS = parseInt(p.get('days')) || 7; // valor inicial desde URL
+
+    const MAX = 8.0, MIN = 2.0;
+    let chartInstance = null;
+
+    if (!ID || !KEY || !FIELD) {
+        document.body.innerHTML = "<div class='container'><h1>Error: Datos incompletos.</h1></div>";
+    } else {
+        setupDaySelector();
+        run(DAYS);
+    }
+
+    function setupDaySelector() {
+        document.querySelectorAll('.btn-day').forEach(btn => {
+            const d = parseInt(btn.dataset.days);
+            if (d === DAYS) btn.classList.add('active');
+            btn.addEventListener('click', () => {
+                document.querySelectorAll('.btn-day').forEach(b => b.classList.remove('active'));
+                btn.classList.add('active');
+                run(d);
+            });
+        });
+    }
+
+    async function run(days) {
+        DAYS = days;
+        const minutes = days * 1440; // 1 día = 1440 minutos
+
+        try {
+            document.getElementById('loading').style.display = 'block';
+            document.getElementById('content').style.display = 'none';
+
+            // ✅ Corregido: espacio extra en la URL
+            const url = `https://api.thingspeak.com/channels/${ID}/feeds.json?api_key=${KEY}&minutes=${minutes}`;
+            const res = await fetch(url);
+            const data = await res.json();
+
+            if (!data.feeds || data.feeds.length === 0) {
+                document.getElementById('status').innerText = "Sin datos en este rango.";
+                return;
+            }
+
+            document.getElementById('status').innerText = "Procesando...";
+            document.getElementById('sensorName').innerText = data.channel[FIELD] || "Sensor";
+            document.getElementById('teamName').innerText = data.channel.name || "Sin nombre";
+
+            // Graficar (con muestreo)
+            const limit = 1000;
+            const feeds = data.feeds;
+            const step = Math.max(1, Math.ceil(feeds.length / limit));
+            const labels = [], values = [];
+
+            for (let i = 0; i < feeds.length; i += step) {
+                labels.push(formatDate(feeds[i].created_at));
+                values.push(parseFloat(feeds[i][FIELD]));
+            }
+
+            drawChart(labels, values, data.channel[FIELD] || "Valor");
+
+            // Tablas
+            fillAlerts(feeds, FIELD);
+            fillWifi(feeds);
+
+            document.getElementById('loading').style.display = 'none';
+            document.getElementById('content').style.display = 'block';
+
+        } catch (e) {
+            console.error(e);
+            document.getElementById('status').innerText = "Error al cargar datos.";
+            document.getElementById('status').style.color = "red";
+        }
+    }
+
+    function drawChart(labels, values, label) {
+        const ctx = document.getElementById('chart').getContext('2d');
+        if (chartInstance) chartInstance.destroy();
+        chartInstance = new Chart(ctx, {
+            type: 'line',
+            data: {
+                labels,
+                datasets: [{
+                    label,
+                    data: values,
+                    borderColor: '#3b82f6',
+                    backgroundColor: 'rgba(59,130,246,0.1)',
+                    borderWidth: 2,
+                    pointRadius: 0,
+                    tension: 0.3,
+                    fill: true
+                }]
+            },
+            options: {
+                responsive: true,
+                maintainAspectRatio: false,
+                animation: false,
+                scales: {
+                    y: { beginAtZero: false }
+                },
+                interaction: { mode: 'index', intersect: false }
+            }
+        });
+    }
+
+    function fillAlerts(feeds, field) {
+        const tbody = document.querySelector('#alertTable tbody');
+        let rows = '';
+        let count = 0;
+        for (let i = feeds.length - 1; i >= 0; i--) {
+            const val = parseFloat(feeds[i][field]);
+            if (!isNaN(val) && (val > MAX || val < MIN)) {
+                rows += `<tr class="row-alert">
+                    <td>${formatDateTime(feeds[i].created_at)}</td>
+                    <td>${val.toFixed(1)}</td>
+                    <td>${val > MAX ? '🔥 Alta' : '❄️ Baja'}</td>
+                </tr>`;
+                count++;
+            }
+        }
+        tbody.innerHTML = count ? rows : `<tr><td colspan="3" class="empty">✅ Sin alertas en este periodo.</td></tr>`;
+    }
+
+    function fillWifi(feeds) {
+        const tbody = document.querySelector('#wifiTable tbody');
+        let rows = '';
+        let count = 0;
+        for (let i = 1; i < feeds.length; i++) {
+            const now = new Date(feeds[i].created_at);
+            const prev = new Date(feeds[i-1].created_at);
+            const diff = (now - prev) / 60000; // minutos
+            if (diff > 20) {
+                rows += `<tr>
+                    <td>${formatDateTime(feeds[i-1].created_at)}</td>
+                    <td style="color:var(--danger); font-weight:bold">${Math.round(diff)} min</td>
+                    <td>${formatDateTime(feeds[i].created_at)}</td>
+                </tr>`;
+                count++;
+            }
+        }
+        tbody.innerHTML = count ? rows : `<tr><td colspan="3" class="empty">✅ Conexión estable.</td></tr>`;
+    }
+
+    function formatDate(iso) {
+        const d = new Date(iso);
+        return `${d.getDate()}/${d.getMonth()+1} ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`;
+    }
+    function formatDateTime(iso) {
+        const d = new Date(iso);
+        return `${d.getDate()}/${d.getMonth()+1}/${d.getFullYear()} ${d.getHours()}:${String(d.getMinutes()).padStart(2,'0')}`;
+    }
+</script>
+</body>
+</html>
